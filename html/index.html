@@ -1,0 +1,313 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Air-Core Inductor Calculator</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2228; --muted: #5d6773;
+    --border: #d9dee4; --accent: #c0622b; --accent-soft: #f3e3d8;
+    --warn-bg: #fff4d6; --warn-text: #7a5300; --form: #e8e2d6; --form-edge: #b9ad97;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #15181c; --panel: #1e2227; --text: #e4e7eb; --muted: #9aa4af;
+      --border: #333a42; --accent: #e08a52; --accent-soft: #3a2a20;
+      --warn-bg: #3a3014; --warn-text: #f0cf7a; --form: #3a362f; --form-edge: #6b6252;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 48px; }
+  h1 { font-size: 1.5rem; margin: 0 0 4px; }
+  h2 { font-size: 1.05rem; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin: 0 0 20px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+  @media (max-width: 820px) { .grid { grid-template-columns: minmax(0, 1fr); } }
+  .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+  .full { grid-column: 1 / -1; }
+
+  .row { display: grid; grid-template-columns: 9.5rem minmax(0, 1fr) 6.5rem; gap: 10px; align-items: center; margin-bottom: 10px; }
+  .row label { font-weight: 600; font-size: 0.92rem; }
+  .row label small { display: block; font-weight: 400; color: var(--muted); }
+  .row input[type=number], select {
+    width: 100%; padding: 5px 6px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 14px; }
+  .toolbar select { width: auto; }
+  button {
+    padding: 5px 10px; border: 1px solid var(--accent); background: var(--accent-soft);
+    color: var(--text); border-radius: 6px; font: inherit; cursor: pointer;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+  td { padding: 7px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  td.name { font-weight: 600; width: 38%; }
+  td.val { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--accent); white-space: nowrap; text-align: right; width: 24%; }
+  td.eq { color: var(--muted); font-family: ui-monospace, Menlo, monospace; font-size: 0.8rem; }
+
+  .warn { background: var(--warn-bg); color: var(--warn-text); border-radius: 6px; padding: 8px 10px; margin-top: 10px; font-size: 0.9rem; }
+  .warn:empty { display: none; }
+  svg { width: 100%; height: auto; display: block; }
+  .legend { color: var(--muted); font-size: 0.85rem; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Air-core inductor calculator</h1>
+  <p class="sub">Single-layer coil, using the Wheeler (ARRL) inductance formula and the Medhurst self-capacitance estimate from <code>docs/notes.md</code>.</p>
+
+  <div class="grid">
+    <section class="panel">
+      <h2>Coil parameters</h2>
+      <div class="toolbar">
+        <label>Length units
+          <select id="unit">
+            <option value="mm">mm</option>
+            <option value="cm">cm</option>
+            <option value="in">inches</option>
+          </select>
+        </label>
+        <label>Wire gauge
+          <select id="awg"></select>
+        </label>
+      </div>
+      <div id="inputs"></div>
+      <div class="toolbar">
+        <button id="closeWound" title="Set length = turns × wire diameter">Close-wound length</button>
+        <button id="ldOne" title="Set length = diameter">Set l/d = 1</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Results</h2>
+      <table id="results"></table>
+      <div class="warn" id="warnings"></div>
+    </section>
+
+    <section class="panel full">
+      <h2>Side view (to scale)</h2>
+      <svg id="coil" viewBox="0 0 800 260" role="img" aria-label="Side view of the coil"></svg>
+      <div class="legend" id="legend"></div>
+    </section>
+
+    <section class="panel full">
+      <h2>Turns for a target inductance</h2>
+      <p class="sub" style="margin-bottom:12px">Uses the diameter and length above. n = √(L·(18d + 40l)) / d, with d and l in inches.</p>
+      <div id="targetInputs"></div>
+      <table id="targetResults"></table>
+      <div class="toolbar" style="margin-top:12px">
+        <button id="useTarget">Use these turns above</button>
+      </div>
+    </section>
+  </div>
+</main>
+
+<script>
+// All lengths are stored internally in mm.
+const UNIT_MM = { mm: 1, cm: 10, in: 25.4 };
+
+// Medhurst H-factor vs l/d, from docs/notes.md.
+const H_TABLE = [[1.0, 0.46], [1.5, 0.47], [2.0, 0.50], [3.0, 0.61], [5.0, 0.81]];
+
+const state = { d: 20, l: 20, n: 20, w: 0.8, Lt: 1.0, unit: 'mm' };
+
+// key, label, hint, min/max in mm (or raw for unitless), step, isLength
+const FIELDS = [
+  { key: 'd', label: 'Coil diameter', hint: 'd', min: 1, max: 100, step: 0.1, len: true },
+  { key: 'l', label: 'Coil length', hint: 'l', min: 1, max: 200, step: 0.1, len: true },
+  { key: 'n', label: 'Turns', hint: 'n', min: 1, max: 200, step: 0.25, len: false },
+  { key: 'w', label: 'Wire diameter', hint: 'd_wire', min: 0.05, max: 4, step: 0.01, len: true },
+];
+const TARGET_FIELDS = [
+  { key: 'Lt', label: 'Target inductance', hint: 'μH', min: 0.01, max: 100, step: 0.01, len: false },
+];
+
+const $ = id => document.getElementById(id);
+
+function fmt(x, digits = 3) {
+  if (!isFinite(x)) return '—';
+  if (x === 0) return '0';
+  const a = Math.abs(x);
+  if (a >= 1000 || a < 0.001) return x.toExponential(2);
+  return Number(x.toPrecision(digits + (a >= 100 ? 1 : 0))).toString();
+}
+
+function toDisplay(f, mm) { return f.len ? mm / UNIT_MM[state.unit] : mm; }
+function fromDisplay(f, v) { return f.len ? v * UNIT_MM[state.unit] : v; }
+function unitLabel(f) { return f.len ? state.unit : (f.key === 'n' ? 'turns' : f.hint); }
+
+function buildRows(container, fields) {
+  container.innerHTML = '';
+  for (const f of fields) {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `
+      <label for="num-${f.key}">${f.label}<small>${f.hint === 'μH' ? '' : f.hint + ', '}<span id="u-${f.key}"></span></small></label>
+      <input type="range" id="rng-${f.key}">
+      <input type="number" id="num-${f.key}">`;
+    container.appendChild(row);
+    const rng = row.querySelector('input[type=range]');
+    const num = row.querySelector('input[type=number]');
+    rng.addEventListener('input', () => { state[f.key] = fromDisplay(f, +rng.value); sync(); });
+    num.addEventListener('input', () => {
+      const v = parseFloat(num.value);
+      if (isFinite(v) && v > 0) { state[f.key] = fromDisplay(f, v); sync(num); }
+    });
+  }
+}
+
+function syncRows(fields, skip) {
+  for (const f of fields) {
+    const k = UNIT_MM[state.unit];
+    const rng = $('rng-' + f.key), num = $('num-' + f.key);
+    const step = f.len ? (state.unit === 'mm' ? f.step : state.unit === 'cm' ? f.step / 10 : 0.001) : f.step;
+    rng.min = toDisplay(f, f.min); rng.max = toDisplay(f, f.max); rng.step = step;
+    num.step = step; num.min = 0;
+    const v = toDisplay(f, state[f.key]);
+    rng.value = v;
+    if (num !== skip) num.value = +v.toFixed(f.len ? (state.unit === 'in' ? 4 : 3) : 3);
+    $('u-' + f.key).textContent = unitLabel(f);
+  }
+}
+
+function hFactor(ratio) {
+  if (ratio <= H_TABLE[0][0]) return H_TABLE[0][1];
+  for (let i = 1; i < H_TABLE.length; i++) {
+    const [x0, y0] = H_TABLE[i - 1], [x1, y1] = H_TABLE[i];
+    if (ratio <= x1) return y0 + (y1 - y0) * (ratio - x0) / (x1 - x0);
+  }
+  return H_TABLE[H_TABLE.length - 1][1];
+}
+
+function wheelerL(dIn, lIn, n) { return (dIn * dIn * n * n) / (18 * dIn + 40 * lIn); }
+
+function calc() {
+  const { d, l, n, w } = state;
+  const dIn = d / 25.4, lIn = l / 25.4, dCm = d / 10;
+  const L = wheelerL(dIn, lIn, n);                       // μH
+  const ratio = l / d;
+  const H = hFactor(ratio);
+  const Cs = H * dCm;                                    // pF
+  const fSrf = 1 / (2 * Math.PI * Math.sqrt(L * 1e-6 * Cs * 1e-12)); // Hz
+  const Nmax = d / w;
+  const pitch = l / n;
+  const closeLen = n * w;
+  const wireLen = n * Math.PI * (d + w);                 // centre of wire, mm
+  return { L, ratio, H, Cs, fSrf, Nmax, pitch, closeLen, wireLen, dIn, lIn, dCm };
+}
+
+function lenFmt(mm) { return fmt(mm / UNIT_MM[state.unit]) + ' ' + state.unit; }
+
+function render() {
+  const r = calc();
+  const rows = [
+    ['Inductance L', fmt(r.L) + ' μH', 'L = d²n² / (18d + 40l)   [d, l in inches]'],
+    ['Length / diameter', fmt(r.ratio), 'l / d'],
+    ['Medhurst H-factor', fmt(r.H, 2), 'interpolated from table (clamped to 1–5)'],
+    ['Self-capacitance Cs', fmt(r.Cs) + ' pF', 'Cs = H · d   [d in cm]'],
+    ['SRF', fmt(r.fSrf / 1e6) + ' MHz', 'f = 1 / (2π √(L·Cs))'],
+    ['N_max at l/d = 1', fmt(r.Nmax), 'N_max = d / d_wire'],
+    ['Turn pitch', lenFmt(r.pitch), 'l / n'],
+    ['Close-wound length', lenFmt(r.closeLen), 'n · d_wire'],
+    ['Wire needed (approx.)', fmt(r.wireLen / 10) + ' cm', 'n · π · (d + d_wire), excl. leads'],
+  ];
+  $('results').innerHTML = rows.map(([a, b, c]) =>
+    `<tr><td class="name">${a}</td><td class="val">${b}</td><td class="eq">${c}</td></tr>`).join('');
+
+  const warns = [];
+  if (r.pitch < state.w) warns.push(`Turns don't fit: ${fmt(state.n)} turns of ${lenFmt(state.w)} wire need at least ${lenFmt(r.closeLen)} of length.`);
+  if (r.ratio < 1 || r.ratio > 5) warns.push(`l/d = ${fmt(r.ratio)} is outside the H-factor table (1–5); Cs uses the nearest end value.`);
+  if (r.ratio < 0.4) warns.push('Wheeler\'s formula loses accuracy for l < 0.4·d (short, fat coils).');
+  $('warnings').innerHTML = warns.map(w => `<div>• ${w}</div>`).join('');
+
+  // Target inductance
+  const nT = Math.sqrt(state.Lt * (18 * r.dIn + 40 * r.lIn)) / r.dIn;
+  const tRows = [
+    ['Turns required', fmt(nT), 'n = √(L·(18d + 40l)) / d'],
+    ['Close-wound length', lenFmt(nT * state.w), 'n · d_wire (compare to l = ' + lenFmt(state.l) + ')'],
+    ['Fits in length?', nT * state.w <= state.l ? 'yes' : 'no', ''],
+  ];
+  $('targetResults').innerHTML = tRows.map(([a, b, c]) =>
+    `<tr><td class="name">${a}</td><td class="val">${b}</td><td class="eq">${c}</td></tr>`).join('');
+  state._nT = nT;
+
+  drawCoil(r);
+}
+
+function drawCoil(r) {
+  const svg = $('coil');
+  const W = 800, H = 260, pad = 30;
+  const accent = getComputedStyle(document.documentElement).getPropertyValue('--accent').trim();
+  const formFill = getComputedStyle(document.documentElement).getPropertyValue('--form').trim();
+  const formEdge = getComputedStyle(document.documentElement).getPropertyValue('--form-edge').trim();
+  const muted = getComputedStyle(document.documentElement).getPropertyValue('--muted').trim();
+
+  const { d, l, n, w } = state;
+  const totalW = Math.max(l, n * w) + w;
+  const totalH = d + 2 * w;
+  const s = Math.min((W - 2 * pad - 80) / totalW, (H - 2 * pad) / totalH);
+  const cx = W / 2, cy = H / 2;
+  const x0 = cx - (l * s) / 2;
+  const formLen = Math.max(l, n * w) * s + 40;
+  const top = cy - (d / 2) * s, bot = cy + (d / 2) * s;
+
+  let out = `<rect x="${cx - formLen / 2}" y="${top}" width="${formLen}" height="${d * s}" fill="${formFill}" stroke="${formEdge}" rx="3"/>`;
+  const nDraw = Math.min(Math.ceil(n), 400);
+  const pitch = l / n;
+  const sw = Math.max(w * s, 0.6);
+  for (let i = 0; i < nDraw; i++) {
+    const xa = x0 + (i * pitch + w / 2) * s;
+    const xb = xa + pitch * s * 0.5;
+    out += `<line x1="${xa}" y1="${top}" x2="${xb}" y2="${bot}" stroke="${accent}" stroke-width="${sw}" stroke-linecap="round"/>`;
+  }
+  // dimensions
+  const dimY = bot + 18;
+  out += `<line x1="${x0}" y1="${dimY}" x2="${x0 + l * s}" y2="${dimY}" stroke="${muted}" marker-start="url(#a)" marker-end="url(#a)"/>`;
+  out += `<text x="${cx}" y="${dimY + 14}" fill="${muted}" font-size="12" text-anchor="middle">l = ${lenFmt(l)}</text>`;
+  const dimX = cx + formLen / 2 + 16;
+  out += `<line x1="${dimX}" y1="${top}" x2="${dimX}" y2="${bot}" stroke="${muted}" marker-start="url(#a)" marker-end="url(#a)"/>`;
+  out += `<text x="${dimX + 6}" y="${cy + 4}" fill="${muted}" font-size="12">d = ${lenFmt(d)}</text>`;
+  svg.innerHTML = `<defs><marker id="a" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="${muted}"/></marker></defs>` + out;
+  $('legend').textContent = `${fmt(n)} turns, pitch ${lenFmt(r.pitch)}, wire ${lenFmt(w)}` + (n > nDraw ? ` (drawing capped at ${nDraw} turns)` : '');
+}
+
+function sync(skip) {
+  syncRows(FIELDS, skip);
+  syncRows(TARGET_FIELDS, skip);
+  const a = $('awg');
+  const match = [...a.options].find(o => o.value && Math.abs(+o.value - state.w) < 0.0005);
+  a.value = match ? match.value : '';
+  render();
+}
+
+// AWG bare-copper diameter: d(mm) = 0.127 · 92^((36 − AWG) / 39)
+function buildAwg() {
+  const a = $('awg');
+  a.innerHTML = '<option value="">custom</option>';
+  for (let g = 10; g <= 36; g++) {
+    const mm = +(0.127 * Math.pow(92, (36 - g) / 39)).toFixed(3);
+    a.innerHTML += `<option value="${mm}">AWG ${g} (${mm} mm)</option>`;
+  }
+  a.addEventListener('change', () => { if (a.value) { state.w = +a.value; sync(); } });
+}
+
+buildAwg();
+buildRows($('inputs'), FIELDS);
+buildRows($('targetInputs'), TARGET_FIELDS);
+$('unit').addEventListener('change', e => { state.unit = e.target.value; sync(); });
+$('closeWound').addEventListener('click', () => { state.l = state.n * state.w; sync(); });
+$('ldOne').addEventListener('click', () => { state.l = state.d; sync(); });
+$('useTarget').addEventListener('click', () => { state.n = +state._nT.toFixed(2); sync(); });
+window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', render);
+sync();
+</script>
+</body>
+</html>
